@@ -6,7 +6,7 @@ Evidence-first thesis review for graduate students. **PDF uploads only.**
 
 ## Status
 
-Foundation only, not a completed audit service. This first slice provides in-memory PDF intake and evidence contracts with offline synthetic tests. No web server, external scholarly API or LLM is called. No manuscript is stored. Reports, user accounts and deletion workflows are planned, not implemented.
+This repository contains a foundation and a minimal PDF-only ASGI intake prototype, not a completed audit service. The prototype provides bounded uploads, in-memory job ownership, idempotency, cancellation, and synthetic offline tests. It has no production authentication adapter, persistent job database, isolated parser worker, per-owner or per-job quota, rate limit, public deployment, external scholarly API, or LLM.
 
 ## Local development
 
@@ -21,7 +21,21 @@ python -m unittest -v
 
 `audit_contract.parse_pdf(filename, data)` accepts a PDF of at most 20 MiB and 300 pages. It rejects other extensions, invalid signatures, corrupt/encrypted files and any textless page. This conservative first version also rejects legitimate blank pages; better partial-coverage handling is tracked separately. OCR, tables, formula interpretation and reading-order guarantees are not implemented. Text presence alone is not proof of correct extraction.
 
-Never expose this parser directly to untrusted internet traffic: isolated workers with CPU/memory/time limits and bounded request streaming are release prerequisites. The byte check happens after bytes are supplied to this library function.
+## Experimental PDF upload API
+
+`upload_api.create_app(authenticate, storage_root)` returns a minimal ASGI application. The host must provide an authentication callback that returns a stable owner ID for an authenticated request, or `None` otherwise. The app has no default identity or development credential.
+
+| Request | Behavior |
+|---|---|
+| `POST /v1/jobs` | Create an owner-bound job; send no body |
+| `POST /v1/jobs/{job_id}/documents?role=thesis` | Stream a thesis PDF as the raw request body |
+| `POST /v1/jobs/{job_id}/documents?role=source` | Stream a supporting literature PDF |
+| `GET /v1/jobs/{job_id}` | Read status and safe document metadata for the owner |
+| `DELETE /v1/jobs/{job_id}` | Cancel the job and remove its uploaded PDFs |
+
+Job creation requires an `Idempotency-Key` header. Document requests require `X-File-Name` and `Idempotency-Key` headers. The filename must end in `.pdf`; the bytes are independently checked by the PDF parser. MIME type is not treated as proof. Each file is limited to 20 MiB and 300 pages. Request bodies are streamed to a private temporary directory; files use owner-only permissions, filenames and extracted text are omitted from responses, and failed or cancelled uploads are removed.
+
+Jobs exist only in process memory. Uploaded files are removed when a job is cancelled or the ASGI app shuts down normally. This prototype has no automatic retention timer; abrupt process termination can leave a stale temporary directory. The parser still runs in the application process without CPU, memory, or wall-clock isolation. Do not mount this prototype on a public server until worker isolation, durable ownership, lifecycle cleanup, and production authentication are implemented and reviewed.
 
 ## Core roadmap
 
@@ -49,7 +63,7 @@ Issue → feature branch → tests → self-review → pull request → owner ap
 
 ## License
 
-The repository currently contains MIT, chosen during repository creation. This PR preserves it. Alternative licensing is a proposal only and requires the owner's explicit decision.
+The repository currently contains MIT, chosen during repository creation. This work preserves it. Alternative licensing is a proposal only and requires the owner's explicit decision.
 
 ## Demo, citation and contact
 
