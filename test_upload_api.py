@@ -192,7 +192,7 @@ class UploadAPITests(unittest.TestCase):
 
     def test_parser_timeout_and_resource_failures_are_safe_and_remove_staging(self):
         job_id = self.create_job()
-        for code in ('PDF_TIMEOUT', 'PDF_RESOURCE_LIMIT'):
+        for code in ('PDF_TIMEOUT', 'PDF_CPU_LIMIT'):
             with self.subTest(code=code):
                 with patch('upload_api.parse_pdf', side_effect=IntakeError(code)):
                     status, payload, _ = self.upload(
