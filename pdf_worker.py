@@ -357,8 +357,10 @@ def _worker_command(*, probe: dict[str, str] | None = None,
     mounts = _sandbox_mounts(excluded_paths)
     command = [
         bubblewrap,
-        "--unshare-all",
-        "--share-net",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
         "--die-with-parent",
         "--new-session",
         "--as-pid-1",
