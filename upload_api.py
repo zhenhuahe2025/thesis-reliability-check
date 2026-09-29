@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 from audit_contract import (
     MAX_BYTES, PAGE_COVERAGE_STATUSES, IntakeError, parse_pdf,
 )
+from citation_mapping import analyze_references
 
 MAX_IDEMPOTENCY_KEY = 200
 Authenticator = Callable[[Mapping[str, Any]], str | None | Awaitable[str | None]]
@@ -121,6 +122,13 @@ def _job_id(raw: str) -> str:
         return str(UUID(raw))
     except (ValueError, AttributeError):
         raise RequestError(404, 'JOB_NOT_FOUND') from None
+
+
+def _document_id(raw: str) -> str:
+    try:
+        return str(UUID(raw))
+    except (ValueError, AttributeError):
+        raise RequestError(404, 'DOCUMENT_NOT_FOUND') from None
 
 
 async def _receive_to_private_file(receive, root: Path,
@@ -229,6 +237,18 @@ class PDFUploadApp:
 
         if path == '/v1/jobs' and method == 'POST':
             await self._create_job(headers, receive, send, owner_id)
+            return
+
+        references_match = re.fullmatch(
+            r'/v1/jobs/([^/]+)/documents/([^/]+)/references', path,
+        )
+        if references_match:
+            if method != 'GET':
+                raise RequestError(405, 'METHOD_NOT_ALLOWED')
+            await self._get_references(
+                send, owner_id, _job_id(references_match.group(1)),
+                _document_id(references_match.group(2)),
+            )
             return
 
         match = re.fullmatch(r'/v1/jobs/([^/]+)(/documents)?', path)
@@ -373,6 +393,46 @@ class PDFUploadApp:
             }
         await self._respond(send, 200, payload)
 
+    async def _get_references(self, send, owner_id: str, job_id: str,
+                              document_id: str):
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.owner_id != owner_id:
+                raise RequestError(404, 'JOB_NOT_FOUND')
+            if job.state == 'cancelled':
+                raise RequestError(409, 'JOB_CANCELLED')
+            record = job.documents.get(document_id)
+            if record is None:
+                raise RequestError(404, 'DOCUMENT_NOT_FOUND')
+            document_path = record.path
+
+        try:
+            data = await asyncio.to_thread(document_path.read_bytes)
+        except FileNotFoundError:
+            raise RequestError(404, 'DOCUMENT_NOT_FOUND') from None
+        try:
+            pages = await asyncio.to_thread(parse_pdf, document_path.name, data)
+        except IntakeError as exc:
+            code = str(exc)
+            status = 503 if code in {
+                'PDF_WORKER_UNAVAILABLE',
+                'PDF_WORKER_ISOLATION_UNAVAILABLE',
+            } else 422
+            raise RequestError(status, code) from None
+
+        analysis = await asyncio.to_thread(analyze_references, pages)
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.owner_id != owner_id:
+                raise RequestError(404, 'JOB_NOT_FOUND')
+            if job.state == 'cancelled':
+                raise RequestError(409, 'JOB_CANCELLED')
+            if job.documents.get(document_id) is not record:
+                raise RequestError(404, 'DOCUMENT_NOT_FOUND')
+        await self._respond(send, 200, self._reference_analysis_json(
+            document_id, analysis,
+        ))
+
     async def _cancel_job(self, send, owner_id: str, job_id: str):
         async with self._lock:
             job = self._jobs.get(job_id)
@@ -398,6 +458,40 @@ class PDFUploadApp:
             'page_count': record.page_count,
             'coverage_summary': dict(record.coverage_summary),
             'page_coverage': [dict(page) for page in record.page_coverage],
+        }
+
+    @staticmethod
+    def _reference_analysis_json(document_id: str, analysis) -> dict[str, Any]:
+        return {
+            'document_id': document_id,
+            'reference_section_found': analysis.reference_section_found,
+            'references': [{
+                'index': entry.index,
+                'label': entry.label,
+                'entry_text': entry.text,
+                'start_page': entry.start_page,
+                'end_page': entry.end_page,
+                'start_offset': entry.start_offset,
+                'end_offset': entry.end_offset,
+                'author_key': entry.author_key,
+                'year': entry.year,
+            } for entry in analysis.references],
+            'citations': [{
+                'style': anchor.style,
+                'citation_text': anchor.text,
+                'page': anchor.page,
+                'start_offset': anchor.start_offset,
+                'end_offset': anchor.end_offset,
+                'sentence_text': anchor.sentence_text,
+                'sentence_start_offset': anchor.sentence_start_offset,
+                'sentence_end_offset': anchor.sentence_end_offset,
+                'reference_numbers': list(anchor.reference_numbers),
+                'candidate_entry_indexes': list(anchor.candidate_entry_indexes),
+                'unmatched_numbers': list(anchor.unmatched_numbers),
+                'status': anchor.status,
+            } for anchor in analysis.citations],
+            'uncited_entry_indexes': list(analysis.uncited_entry_indexes),
+            'missing_reference_numbers': list(analysis.missing_reference_numbers),
         }
 
     @staticmethod
