@@ -228,13 +228,13 @@ def _run_worker(data: bytes = b"", *, self_test: bool = False) -> dict[str, Any]
         raise IntakeError("PDF_WORKER_UNAVAILABLE") from None
 
     if result.returncode != 0:
-        resource_signals = {
-            -signal.SIGXCPU,
-            -signal.SIGKILL,
-            -signal.SIGSEGV,
+        signal_errors = {
+            -signal.SIGXCPU: "PDF_CPU_LIMIT",
+            -signal.SIGKILL: "PDF_WORKER_KILLED",
+            -signal.SIGSEGV: "PDF_WORKER_CRASHED",
         }
-        if result.returncode in resource_signals:
-            raise IntakeError("PDF_RESOURCE_LIMIT")
+        if result.returncode in signal_errors:
+            raise IntakeError(signal_errors[result.returncode])
         raise IntakeError("PDF_WORKER_FAILED")
     if len(result.stdout) > MAX_WORKER_OUTPUT_BYTES:
         raise IntakeError("PDF_TEXT_LIMIT")
