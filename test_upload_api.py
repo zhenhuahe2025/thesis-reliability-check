@@ -2,10 +2,12 @@
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from audit_contract import IntakeError, parse_pdf
 from test_audit_contract import pdf
 from upload_api import create_app
 
@@ -136,6 +138,15 @@ class UploadAPITests(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         self.assertEqual(payload['page_count'], 1)
+        self.assertEqual(payload['coverage_summary']['text_extracted'], 1)
+        self.assertEqual(payload['coverage_summary']['blank'], 0)
+        self.assertEqual(payload['page_coverage'], [{
+            'physical_page': 1,
+            'coverage_status': 'text_extracted',
+            'printed_label': None,
+            'text_start_offset': 0,
+            'text_end_offset': len('A private synthetic sentence'),
+        }])
         self.assertEqual(payload['size_bytes'], len(content))
         self.assertNotIn('private-name.pdf', json.dumps(payload))
         files = self.stored_files()
@@ -144,6 +155,19 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.app._root.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.storage.stat().st_mode & 0o777, 0o700)
+
+    def test_blank_page_upload_reports_coverage_without_rejecting_document(self):
+        job_id = self.create_job()
+        status, payload, _ = self.upload(
+            job_id, content=pdf(text=''), key='blank-page',
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(payload['page_count'], 1)
+        self.assertEqual(payload['coverage_summary']['blank'], 1)
+        self.assertEqual(payload['coverage_summary']['text_extracted'], 0)
+        self.assertEqual(payload['page_coverage'][0]['physical_page'], 1)
+        self.assertEqual(payload['page_coverage'][0]['coverage_status'], 'blank')
+        self.assertIsNone(payload['page_coverage'][0]['printed_label'])
 
     def test_docx_is_rejected_even_when_body_is_a_valid_pdf(self):
         job_id = self.create_job()
@@ -165,6 +189,19 @@ class UploadAPITests(unittest.TestCase):
         status, payload, _ = self.upload(job_id, content=b'')
         self.assertEqual((status, payload['error']), (400, 'EMPTY_FILE'))
         self.assertEqual(self.stored_files(), [])
+
+    def test_parser_timeout_and_resource_failures_are_safe_and_remove_staging(self):
+        job_id = self.create_job()
+        for code in ('PDF_TIMEOUT', 'PDF_RESOURCE_LIMIT'):
+            with self.subTest(code=code):
+                with patch('upload_api.parse_pdf', side_effect=IntakeError(code)):
+                    status, payload, _ = self.upload(
+                        job_id, filename='private-manuscript-name.pdf',
+                        content=b'private manuscript bytes', key=f'failure-{code}',
+                    )
+                self.assertEqual((status, payload), (422, {'error': code}))
+                self.assertNotIn('private', json.dumps(payload))
+                self.assertEqual(self.stored_files(), [])
 
     def test_declared_oversize_is_rejected_before_body_read(self):
         job_id = self.create_job()
@@ -256,6 +293,40 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual(cancel_result[0][0], 200)
         self.assertEqual(self.stored_files(), [])
 
+    def test_cancel_during_parse_keeps_asgi_event_loop_responsive(self):
+        job_id = self.create_job()
+        content = pdf()
+        parse_started = threading.Event()
+        release_parse = threading.Event()
+
+        def delayed_parse(filename, data):
+            parse_started.set()
+            release_parse.wait(timeout=2)
+            return parse_pdf(filename, data)
+
+        async def run():
+            with patch('upload_api.parse_pdf', side_effect=delayed_parse):
+                upload_task = asyncio.create_task(self.call_async(
+                    'POST', f'/v1/jobs/{job_id}/documents?role=thesis',
+                    headers={'x-file-name': 'paper.pdf',
+                             'idempotency-key': 'cancel-during-parse'},
+                    body=content,
+                ))
+                started = await asyncio.to_thread(parse_started.wait, 1)
+                if not started:
+                    release_parse.set()
+                    await upload_task
+                    self.fail('parser worker did not start')
+                cancelled = await self.call_async('DELETE', f'/v1/jobs/{job_id}')
+                release_parse.set()
+                uploaded = await upload_task
+                return cancelled, uploaded
+
+        cancelled, uploaded = asyncio.run(run())
+        self.assertEqual(cancelled[0], 200)
+        self.assertEqual((uploaded[0], uploaded[1]['error']), (409, 'JOB_CANCELLED'))
+        self.assertEqual(self.stored_files(), [])
+
     def test_asgi_shutdown_removes_instance_private_workspace(self):
         private_workspace = self.app._root
 
@@ -295,6 +366,7 @@ class UploadAPITests(unittest.TestCase):
         serialized = json.dumps(payload)
         self.assertNotIn('sensitive-title.pdf', serialized)
         self.assertNotIn('Secret manuscript wording', serialized)
+        self.assertEqual(payload['documents'][0]['page_coverage'][0]['physical_page'], 1)
 
 
 if __name__ == '__main__':
