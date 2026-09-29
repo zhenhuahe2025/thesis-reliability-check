@@ -6,7 +6,7 @@ Evidence-first thesis review for graduate students. **PDF uploads only.**
 
 ## Status
 
-This repository contains a foundation and a minimal PDF-only ASGI intake prototype, not a completed audit service. The prototype provides bounded uploads, in-memory job ownership, idempotency, cancellation, and synthetic offline tests. It has no production authentication adapter, persistent job database, isolated parser worker, per-owner or per-job quota, rate limit, public deployment, external scholarly API, or LLM.
+This repository contains a foundation and a minimal PDF-only ASGI intake prototype, not a completed audit service. The prototype provides bounded uploads, in-memory job ownership, idempotency, cancellation, and synthetic offline tests. A restricted Linux subprocess now parses PDFs with CPU, address-space, file-descriptor, wall-clock, and network limits. It is not a full OS sandbox: the worker retains the service UID and filesystem view. There is no production authentication adapter, persistent job database, separate-UID/filesystem sandbox, per-owner or per-job quota, rate limit, public deployment, external scholarly API, or LLM.
 
 ## Local development
 
@@ -19,7 +19,11 @@ python -m pip install -r requirements.txt
 python -m unittest -v
 ```
 
-`audit_contract.parse_pdf(filename, data)` accepts a PDF of at most 20 MiB and 300 pages. It rejects other extensions, invalid signatures, corrupt/encrypted files and any textless page. This conservative first version also rejects legitimate blank pages; better partial-coverage handling is tracked separately. OCR, tables, formula interpretation and reading-order guarantees are not implemented. Text presence alone is not proof of correct extraction.
+The parser requires Linux and the system `libseccomp` runtime. It fails closed with `PDF_WORKER_ISOLATION_UNAVAILABLE` when the network-denial filter cannot be installed.
+
+`audit_contract.parse_pdf(filename, data)` accepts a PDF of at most 20 MiB and 300 pages. It rejects other extensions, invalid signatures, corrupt/encrypted files and documents whose extracted text exceeds the configured limit. A restricted child process receives bytes through stdin, is limited to 8/10 CPU seconds, 512 MiB address space and 32 open files, and is stopped after 12 seconds of wall time. Linux seccomp denies network and process-creation syscalls. The parent discards worker stderr and maps failures to stable codes without document content.
+
+Each physical page receives one coverage state: `text_extracted`, `mixed`, `image_only`, `blank`, `unclassified_content`, or `garbled`. Textless pages remain in the result rather than rejecting the whole PDF. Text offsets are end-exclusive code-point offsets into the page texts joined with one LF between pages; each page’s extracted text is otherwise unchanged. `printed_label` remains unknown (`null`); the parser does not invent printed page numbers. The garble state detects replacement characters and selected control-character cases, not every possible bad font mapping. OCR, table/formula interpretation, visual reading-order checks, and multicolumn order guarantees are not implemented. Text presence alone is not proof of correct extraction.
 
 ## Experimental PDF upload API
 
@@ -35,7 +39,7 @@ python -m unittest -v
 
 Job creation requires an `Idempotency-Key` header. Document requests require `X-File-Name` and `Idempotency-Key` headers. The filename must end in `.pdf`; the bytes are independently checked by the PDF parser. MIME type is not treated as proof. Each file is limited to 20 MiB and 300 pages. Request bodies are streamed to a private temporary directory; files use owner-only permissions, filenames and extracted text are omitted from responses, and failed or cancelled uploads are removed.
 
-Jobs exist only in process memory. Uploaded files are removed when a job is cancelled or the ASGI app shuts down normally. This prototype has no automatic retention timer; abrupt process termination can leave a stale temporary directory. The parser still runs in the application process without CPU, memory, or wall-clock isolation. Do not mount this prototype on a public server until worker isolation, durable ownership, lifecycle cleanup, and production authentication are implemented and reviewed.
+Job status returns per-page physical numbers, coverage states, optional printed labels, offsets, and counts without returning filenames or extracted text. Jobs exist only in process memory. Uploaded files are removed when a job is cancelled or the ASGI app shuts down normally. This prototype has no automatic retention timer; abrupt process termination can leave a stale temporary directory. The worker still shares the application service UID and filesystem view; seccomp and rlimits do not replace a container or separate-UID sandbox. Do not mount this prototype on a public server until filesystem/UID isolation, durable ownership, lifecycle cleanup, quotas, rate limits, and production authentication are implemented and reviewed.
 
 ## Core roadmap
 

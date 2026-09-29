@@ -63,7 +63,10 @@ class IntakeTests(unittest.TestCase):
         self.assert_error('ENCRYPTED_PDF', 'paper.pdf', pdf(encrypted=True))
 
     def test_textless(self):
-        self.assert_error('TEXTLESS_PAGE_REQUIRES_REVIEW', 'paper.pdf', pdf(text=''))
+        page, = parse_pdf('paper.pdf', pdf(text=''))
+        self.assertEqual(page.coverage_status, 'blank')
+        self.assertIsNone(page.printed_label)
+        self.assertEqual((page.text_start_offset, page.text_end_offset), (0, 0))
 
 
 class EvidenceTests(unittest.TestCase):
