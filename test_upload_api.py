@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from audit_contract import IntakeError, parse_pdf
+from audit_contract import IntakeError, Page, parse_pdf
 from test_audit_contract import pdf
+from test_support import requires_pdf_sandbox
 from upload_api import create_app
 
 
@@ -114,6 +115,15 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual(other_owner[0], 201)
         self.assertNotEqual(first[1]['job_id'], other_owner[1]['job_id'])
 
+    def test_parser_receives_private_storage_as_a_forbidden_mount_path(self):
+        job_id = self.create_job()
+        with patch('upload_api.parse_pdf', return_value=(Page(1, 'Synthetic'),)) as parser:
+            status, payload, _ = self.upload(job_id, content=pdf())
+        self.assertEqual(status, 201)
+        self.assertEqual(payload['page_count'], 1)
+        self.assertEqual(parser.call_args.kwargs['sandbox_exclusions'],
+                         (str(self.storage.resolve()),))
+
     def upload(self, job_id, *, owner='alice', filename='paper.pdf',
                content=None, key='upload-1', headers=None, chunks=None,
                include_length=True):
@@ -128,6 +138,7 @@ class UploadAPITests(unittest.TestCase):
             include_length=include_length,
         )
 
+    @requires_pdf_sandbox
     def test_pdf_upload_is_streamed_and_metadata_omits_filename(self):
         job_id = self.create_job()
         content = pdf(text='A private synthetic sentence')
@@ -156,6 +167,7 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual(self.app._root.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.storage.stat().st_mode & 0o777, 0o700)
 
+    @requires_pdf_sandbox
     def test_blank_page_upload_reports_coverage_without_rejecting_document(self):
         job_id = self.create_job()
         status, payload, _ = self.upload(
@@ -232,6 +244,7 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual((status, payload['error']), (400, 'CONTENT_LENGTH_MISMATCH'))
         self.assertEqual(self.stored_files(), [])
 
+    @requires_pdf_sandbox
     def test_idempotent_retry_returns_same_document_without_duplicate_file(self):
         job_id = self.create_job()
         content = pdf()
@@ -242,6 +255,7 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual(first[1]['document_id'], second[1]['document_id'])
         self.assertEqual(len(self.stored_files()), 1)
 
+    @requires_pdf_sandbox
     def test_idempotency_key_cannot_be_reused_for_different_content(self):
         job_id = self.create_job()
         self.assertEqual(self.upload(job_id, content=pdf(), key='same-request')[0], 201)
@@ -261,6 +275,7 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual((status, payload['error']), (404, 'JOB_NOT_FOUND'))
         self.assertEqual(self.stored_files(), [])
 
+    @requires_pdf_sandbox
     def test_cancel_removes_private_pdf_and_blocks_future_uploads(self):
         job_id = self.create_job()
         self.assertEqual(self.upload(job_id, content=pdf())[0], 201)
@@ -293,16 +308,17 @@ class UploadAPITests(unittest.TestCase):
         self.assertEqual(cancel_result[0][0], 200)
         self.assertEqual(self.stored_files(), [])
 
+    @requires_pdf_sandbox
     def test_cancel_during_parse_keeps_asgi_event_loop_responsive(self):
         job_id = self.create_job()
         content = pdf()
         parse_started = threading.Event()
         release_parse = threading.Event()
 
-        def delayed_parse(filename, data):
+        def delayed_parse(filename, data, **kwargs):
             parse_started.set()
             release_parse.wait(timeout=2)
-            return parse_pdf(filename, data)
+            return parse_pdf(filename, data, **kwargs)
 
         async def run():
             with patch('upload_api.parse_pdf', side_effect=delayed_parse):
@@ -357,6 +373,7 @@ class UploadAPITests(unittest.TestCase):
         status, payload, _ = self.call('POST', '/v1/jobs', owner='invalid')
         self.assertEqual((status, payload['error']), (401, 'AUTHENTICATION_REQUIRED'))
 
+    @requires_pdf_sandbox
     def test_job_status_never_returns_filename_or_pdf_text(self):
         job_id = self.create_job()
         self.upload(job_id, filename='sensitive-title.pdf',

@@ -28,9 +28,12 @@ class Page:
     text_end_offset: int = 0
 
 
-def parse_pdf(filename: str, data: bytes) -> tuple[Page, ...]:
+def parse_pdf(filename: str, data: bytes, *,
+              sandbox_exclusions: tuple[str, ...] = ()) -> tuple[Page, ...]:
     """Parse in a restricted worker and retain explicit page coverage.
 
+    Host paths that may contain uploaded documents must be supplied in
+    ``sandbox_exclusions`` so they cannot be exposed by a runtime mount.
     Offsets are end-exclusive code-point indexes into ``'\\n'.join(page.text
     for page in result)``. The inserted one-character separators are the only
     normalization; each page's extracted text is otherwise preserved exactly.
@@ -46,7 +49,7 @@ def parse_pdf(filename: str, data: bytes) -> tuple[Page, ...]:
         raise IntakeError('INVALID_PDF')
     from pdf_worker import parse_pdf_isolated
 
-    worker_pages = parse_pdf_isolated(data)
+    worker_pages = parse_pdf_isolated(data, excluded_paths=sandbox_exclusions)
     if not 1 <= len(worker_pages) <= MAX_PAGES:
         raise IntakeError('PAGE_LIMIT')
     pages = []
