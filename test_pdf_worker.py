@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -256,8 +257,10 @@ class PageCoverageTests(unittest.TestCase):
 class WorkerBoundaryTests(unittest.TestCase):
     def test_sandbox_command_is_fail_closed_and_has_no_host_writable_bind(self):
         command = pdf_worker._worker_command()
-        self.assertIn("--unshare-all", command)
         self.assertIn("--unshare-user", command)
+        self.assertIn("--unshare-pid", command)
+        self.assertIn("--unshare-ipc", command)
+        self.assertIn("--unshare-uts", command)
         self.assertIn("--die-with-parent", command)
         self.assertIn("--as-pid-1", command)
         self.assertIn("--cap-drop", command)
@@ -285,7 +288,7 @@ class WorkerBoundaryTests(unittest.TestCase):
         result = pdf_worker.check_worker_isolation()
         self.assertTrue(result['network_blocked'])
         self.assertEqual(result['namespaces_isolated'], {
-            'user': True, 'mnt': True, 'pid': True, 'net': True,
+            'user': True, 'mnt': True, 'pid': True,
         })
         self.assertTrue(result['host_tmp_hidden'])
         self.assertTrue(result['host_workspace_hidden'])
@@ -311,6 +314,16 @@ class WorkerBoundaryTests(unittest.TestCase):
     def test_private_storage_overlap_with_runtime_fails_closed(self):
         with self.assertRaises(IntakeError) as caught:
             pdf_worker._sandbox_mounts((sys.prefix,))
+        self.assertEqual(str(caught.exception), 'PDF_WORKER_ISOLATION_UNAVAILABLE')
+
+    def test_private_storage_under_system_library_root_fails_closed(self):
+        roots = [path for path in ('/lib', '/lib64', '/usr/lib', '/usr/lib64')
+                 if os.path.isdir(path)]
+        if not roots:
+            self.skipTest('No system library mount roots are present')
+        private_storage = str(Path(roots[0]) / 'trc-private-storage')
+        with self.assertRaises(IntakeError) as caught:
+            pdf_worker._sandbox_mounts((private_storage,))
         self.assertEqual(str(caught.exception), 'PDF_WORKER_ISOLATION_UNAVAILABLE')
 
     def test_bubblewrap_setup_failure_has_a_stable_code(self):
