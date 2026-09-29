@@ -40,7 +40,7 @@
 
 默认建议限制：单文件 20 MiB、300 页，单任务补充文献总量另设预算。浏览器 accept 仅改善体验；服务器必须核验扩展名、字节数、PDF 签名和解析器结果。MIME 不作为可信结论。不把“文件头正确”当作合法 PDF。
 
-Web 层在读取完整文件前限制上传流。当前 Linux 实现用 Bubblewrap 在独立子进程中解析 PDF：空 mount root 只读挂载 Python runtime 和系统库目录，隔离 user/mount/PID/network/IPC/UTS namespace，隐藏宿主工作区、home、上传目录和临时文件；上传存储父目录会作为禁止挂载路径传给 worker，若与 runtime 路径重叠则失败关闭。PDF bytes 只经 stdin 传入；root 只读，`/tmp` 为 64 MiB 私有 tmpfs，并丢弃全部 Linux capabilities。CPU 软/硬限制为 8/10 秒、地址空间 512 MiB、文件描述符 32 个、父进程墙钟超时 12 秒；seccomp 拒绝网络、新建进程、namespace 操作和选定高风险系统调用，worker 标准错误丢弃，输出和提取文本有上限。Bubblewrap、namespace、文件系统边界或 seccomp 不可用时解析失败关闭。该切片仍映射服务 host identity，尚无专用 host UID，也未经生产审查，不能公开部署；上线前还需单独服务身份、生产安全审查和完整运维生命周期控制。拒绝加密文件，绝不执行 PDF 的 JavaScript、附件或外部操作。
+Web 层在读取完整文件前限制上传流。当前 Linux 实现用 Bubblewrap 在独立子进程中解析 PDF：空 mount root 只读挂载 Python runtime 和系统库目录，隔离 user/mount/PID/IPC/UTS namespace，隐藏宿主工作区、home、上传目录和临时文件；上传存储父目录会作为禁止挂载路径传给 worker，若与 runtime 路径重叠则失败关闭。PDF bytes 只经 stdin 传入；root 只读，`/tmp` 为 64 MiB 私有 tmpfs，并丢弃全部 Linux capabilities。worker 不继承任何 network socket；seccomp 在解析前拒绝 socket 与网络相关系统调用，以及新建进程、namespace 操作和选定高风险系统调用。CPU 软/硬限制为 8/10 秒、地址空间 512 MiB、文件描述符 32 个、父进程墙钟超时 12 秒；worker 标准错误丢弃，输出和提取文本有上限。Bubblewrap、namespace、文件系统边界或 seccomp 不可用时解析失败关闭。该切片仍映射服务 host identity，尚无专用 host UID，也未经生产审查，不能公开部署；上线前还需单独服务身份、生产安全审查和完整运维生命周期控制。拒绝加密文件，绝不执行 PDF 的 JavaScript、附件或外部操作。
 
 每页保留 physical_page（1 起）、optional printed_label、文本、解析质量、可选 bbox。页码缺失不编造；一页多个候选时保留歧义。段落/句子偏移映射回原始提取文本，并保留转换映射，不能先改写再定位。
 
