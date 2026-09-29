@@ -5,6 +5,7 @@ reference supports a claim, verify bibliographic metadata, or rewrite text.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 import re
 from typing import Literal, Sequence
@@ -70,6 +71,9 @@ class CitationAnchor:
     candidate_entry_indexes: tuple[int, ...] = ()
     unmatched_numbers: tuple[int, ...] = ()
     status: CitationStatus = "unmapped"
+    sentence_text: str | None = None
+    sentence_start_offset: int | None = None
+    sentence_end_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,88 @@ class _Line:
     page: int
     start: int
     end: int
+
+
+_SENTENCE_CLOSERS = "\"'’”)]}」』"
+_COMMON_ABBREVIATION = re.compile(
+    r"(?:\bet\s+al|\b(?:e\.g|i\.e|dr|prof|fig|eq|no|vs))\.$",
+    re.IGNORECASE,
+)
+
+
+def _sentence_spans(text: str, body_end: int) -> tuple[tuple[int, int], ...]:
+    """Find conservative sentence spans in one linear pass over the body."""
+    spans: list[tuple[int, int]] = []
+
+    def scan_paragraph(start: int, end: int) -> None:
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start == end:
+            return
+        sentence_start = start
+        position = start
+        while position < end:
+            char = text[position]
+            if char in "!?。！？":
+                boundary = position + 1
+                while boundary < end and text[boundary] in _SENTENCE_CLOSERS:
+                    boundary += 1
+            elif char == ".":
+                prefix = text[max(start, position - 32):position + 1]
+                if _COMMON_ABBREVIATION.search(prefix):
+                    position += 1
+                    continue
+                if (position > start and position + 1 < end
+                        and text[position - 1].isdigit()
+                        and text[position + 1].isdigit()):
+                    position += 1
+                    continue
+                if re.search(r"(?:^|\s)[A-Z]\.$", prefix):
+                    position += 1
+                    continue
+                boundary = position + 1
+                while boundary < end and text[boundary] in _SENTENCE_CLOSERS:
+                    boundary += 1
+                if boundary < end and not text[boundary].isspace():
+                    position += 1
+                    continue
+            else:
+                position += 1
+                continue
+
+            sentence_end = boundary
+            while sentence_end > sentence_start and text[sentence_end - 1].isspace():
+                sentence_end -= 1
+            if sentence_start < sentence_end:
+                spans.append((sentence_start, sentence_end))
+            sentence_start = boundary
+            while sentence_start < end and text[sentence_start].isspace():
+                sentence_start += 1
+            position = sentence_start
+        if sentence_start < end:
+            spans.append((sentence_start, end))
+
+    body = text[:body_end]
+    paragraph_start = 0
+    for match in re.finditer(r"\n[ \t]*\n", body):
+        scan_paragraph(paragraph_start, match.start())
+        paragraph_start = match.end()
+    scan_paragraph(paragraph_start, body_end)
+    return tuple(spans)
+
+
+def _sentence_for_anchor(text: str, anchor_start: int, anchor_end: int,
+                         spans: Sequence[tuple[int, int]],
+                         starts: Sequence[int]) -> tuple[int | None, int | None, str | None]:
+    index = bisect_right(starts, anchor_start) - 1
+    if index < 0:
+        return None, None, None
+    start, end = spans[index]
+    if anchor_start < start or anchor_end > end:
+        return None, None, None
+    return start, end, text[start:end]
 
 
 def _joined_text(pages: Sequence[Page]) -> str:
@@ -263,6 +349,8 @@ def analyze_references(pages: Sequence[Page]) -> ReferenceAnalysis:
     heading_start, section_end, section_found = _section_bounds(lines, len(joined))
     references = (_extract_references(lines, joined, heading_start, section_end)
                   if section_found else ())
+    sentence_spans = _sentence_spans(joined, heading_start)
+    sentence_starts = tuple(start for start, _ in sentence_spans)
 
     by_number: dict[int, list[ReferenceEntry]] = {}
     by_author_year: dict[tuple[str, str], list[ReferenceEntry]] = {}
@@ -314,12 +402,18 @@ def analyze_references(pages: Sequence[Page]) -> ReferenceAnalysis:
                     status = "matched"
                 missing_numbers.update(unmatched)
                 candidate_indexes = tuple(entry.index for entry in candidates)
+                sentence_start, sentence_end, sentence = _sentence_for_anchor(
+                    joined, start, end, sentence_spans, sentence_starts,
+                )
                 anchors.append(CitationAnchor(
                     style="numeric", text=raw, page=page.number,
                     start_offset=start, end_offset=end,
                     reference_numbers=requested,
                     candidate_entry_indexes=candidate_indexes,
                     unmatched_numbers=tuple(unmatched), status=status,
+                    sentence_text=sentence,
+                    sentence_start_offset=sentence_start,
+                    sentence_end_offset=sentence_end,
                 ))
                 referenced_entries.update(candidate_indexes)
                 continue
@@ -334,10 +428,16 @@ def analyze_references(pages: Sequence[Page]) -> ReferenceAnalysis:
             candidate_indexes = tuple(entry.index for entry in candidates)
             status = ("unmapped" if not candidates else
                       "ambiguous" if len(candidates) > 1 else "matched")
+            sentence_start, sentence_end, sentence = _sentence_for_anchor(
+                joined, start, end, sentence_spans, sentence_starts,
+            )
             anchors.append(CitationAnchor(
                 style="author_year", text=raw, page=page.number,
                 start_offset=start, end_offset=end,
                 candidate_entry_indexes=candidate_indexes, status=status,
+                sentence_text=sentence,
+                sentence_start_offset=sentence_start,
+                sentence_end_offset=sentence_end,
             ))
             referenced_entries.update(candidate_indexes)
 

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from audit_contract import IntakeError, parse_pdf
+from audit_contract import IntakeError, Page, parse_pdf
 from test_audit_contract import pdf
 from upload_api import create_app
 
@@ -367,6 +367,82 @@ class UploadAPITests(unittest.TestCase):
         self.assertNotIn('sensitive-title.pdf', serialized)
         self.assertNotIn('Secret manuscript wording', serialized)
         self.assertEqual(payload['documents'][0]['page_coverage'][0]['physical_page'], 1)
+
+    def test_owner_can_read_reference_map_with_exact_source_spans(self):
+        job_id = self.create_job()
+        document_text = (
+            "A mixed English and 中文 claim is supported [1].\n\n"
+            "References\n[1] Smith, J. Article title. 2020."
+        )
+        pages = (Page(1, document_text),)
+        with patch('upload_api.parse_pdf', return_value=pages):
+            status, uploaded, _ = self.upload(
+                job_id, filename='private-title.pdf', content=b'%PDF-synthetic',
+            )
+        self.assertEqual(status, 201)
+        path = f'/v1/jobs/{job_id}/documents/{uploaded["document_id"]}/references'
+
+        with patch('upload_api.parse_pdf', return_value=pages):
+            status, result, _ = self.call('GET', path)
+        self.assertEqual(status, 200)
+        self.assertTrue(result['reference_section_found'])
+        self.assertEqual(result['references'][0]['entry_text'],
+                         '[1] Smith, J. Article title. 2020.')
+        self.assertEqual(result['references'][0]['start_page'], 1)
+        self.assertEqual(result['citations'][0]['citation_text'], '[1]')
+        self.assertEqual(result['citations'][0]['sentence_text'],
+                         'A mixed English and 中文 claim is supported [1].')
+        joined = document_text
+        for span in [result['references'][0], result['citations'][0]]:
+            text_key = 'entry_text' if 'entry_text' in span else 'citation_text'
+            self.assertEqual(joined[span['start_offset']:span['end_offset']],
+                             span[text_key])
+        anchor = result['citations'][0]
+        self.assertEqual(
+            joined[anchor['sentence_start_offset']:anchor['sentence_end_offset']],
+            anchor['sentence_text'],
+        )
+        self.assertNotIn('private-title.pdf', json.dumps(result))
+
+        with patch('upload_api.parse_pdf') as parse_mock:
+            status, payload, _ = self.call('GET', path, owner='bob')
+        self.assertEqual((status, payload), (404, {'error': 'JOB_NOT_FOUND'}))
+        parse_mock.assert_not_called()
+
+    def test_reference_map_preserves_missing_and_duplicate_candidates(self):
+        job_id = self.create_job()
+        document_text = (
+            "See [1] and [3].\nReferences\n"
+            "[1] First duplicate.\n[1] Second duplicate."
+        )
+        pages = (Page(1, document_text),)
+        with patch('upload_api.parse_pdf', return_value=pages):
+            status, uploaded, _ = self.upload(
+                job_id, content=b'%PDF-synthetic', key='citation-map',
+            )
+        self.assertEqual(status, 201)
+        with patch('upload_api.parse_pdf', return_value=pages):
+            status, result, _ = self.call(
+                'GET', f'/v1/jobs/{job_id}/documents/{uploaded["document_id"]}/references',
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result['citations'][0]['status'], 'ambiguous')
+        self.assertEqual(result['citations'][0]['candidate_entry_indexes'], [1, 2])
+        self.assertEqual(result['citations'][1]['status'], 'unmapped')
+        self.assertEqual(result['missing_reference_numbers'], [3])
+
+    def test_reference_map_is_unavailable_after_cancel_and_for_unknown_document(self):
+        job_id = self.create_job()
+        unknown_doc = '00000000-0000-0000-0000-000000000000'
+        status, payload, _ = self.call(
+            'GET', f'/v1/jobs/{job_id}/documents/{unknown_doc}/references',
+        )
+        self.assertEqual((status, payload), (404, {'error': 'DOCUMENT_NOT_FOUND'}))
+        self.call('DELETE', f'/v1/jobs/{job_id}')
+        status, payload, _ = self.call(
+            'GET', f'/v1/jobs/{job_id}/documents/{unknown_doc}/references',
+        )
+        self.assertEqual((status, payload), (409, {'error': 'JOB_CANCELLED'}))
 
 
 if __name__ == '__main__':
