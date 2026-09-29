@@ -2,9 +2,9 @@
 
 This prototype streams request bodies to private temporary files before parsing.
 Authentication is injected by the host application; there is no default or
-development credential. Jobs live in memory and the restricted parser worker
-shares the service UID and filesystem, so this is not a full sandbox or a
-production-ready upload service.
+development credential. Jobs live in memory. On Linux, the parser runs in a
+Bubblewrap filesystem and namespace sandbox, but still maps the service host
+identity, so this is not a full production isolation boundary or upload service.
 """
 from __future__ import annotations
 
