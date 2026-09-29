@@ -257,8 +257,10 @@ class PageCoverageTests(unittest.TestCase):
 class WorkerBoundaryTests(unittest.TestCase):
     def test_sandbox_command_is_fail_closed_and_has_no_host_writable_bind(self):
         command = pdf_worker._worker_command()
-        self.assertIn("--unshare-all", command)
-        self.assertIn("--share-net", command)
+        self.assertIn("--unshare-user", command)
+        self.assertIn("--unshare-pid", command)
+        self.assertIn("--unshare-ipc", command)
+        self.assertIn("--unshare-uts", command)
         self.assertNotIn("--unshare-net", command)
         self.assertIn("--die-with-parent", command)
         self.assertIn("--as-pid-1", command)
