@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 import signal
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +18,7 @@ from pypdf.generic import (
 
 import pdf_worker
 from audit_contract import IntakeError, parse_pdf
+from test_support import require_pdf_sandbox
 
 
 def writer_bytes(writer: PdfWriter) -> bytes:
@@ -138,6 +142,9 @@ def image_pdf(*, include_text: bool = False) -> bytes:
 
 
 class PageCoverageTests(unittest.TestCase):
+    def setUp(self):
+        require_pdf_sandbox(self)
+
     def test_physical_page_status_and_joined_text_offsets(self):
         writer = PdfWriter()
         first = writer.add_blank_page(width=300, height=300)
@@ -247,15 +254,71 @@ class PageCoverageTests(unittest.TestCase):
 
 
 class WorkerBoundaryTests(unittest.TestCase):
+    def test_sandbox_command_is_fail_closed_and_has_no_host_writable_bind(self):
+        command = pdf_worker._worker_command()
+        self.assertIn("--unshare-all", command)
+        self.assertIn("--unshare-user", command)
+        self.assertIn("--die-with-parent", command)
+        self.assertIn("--as-pid-1", command)
+        self.assertIn("--cap-drop", command)
+        self.assertIn("ALL", command)
+        self.assertIn("--remount-ro", command)
+        self.assertIn("--tmpfs", command)
+        self.assertNotIn("--bind", command)
+        self.assertNotIn("--share-net", command)
+
+        mounts = pdf_worker._sandbox_mounts()
+        private_paths = {
+            str(Path(__file__).resolve().parent),
+            str(Path.home().resolve()),
+            str(Path(tempfile.gettempdir()).resolve()),
+        }
+        for private_path in private_paths:
+            for source, _ in mounts:
+                self.assertFalse(
+                    pdf_worker._path_contains(private_path, source)
+                    or pdf_worker._path_contains(source, private_path),
+                )
+
     def test_linux_worker_blocks_network_and_sets_resource_limits(self):
+        require_pdf_sandbox(self)
         result = pdf_worker.check_worker_isolation()
         self.assertTrue(result['network_blocked'])
+        self.assertEqual(result['namespaces_isolated'], {
+            'user': True, 'mnt': True, 'pid': True, 'net': True,
+        })
+        self.assertTrue(result['host_tmp_hidden'])
+        self.assertTrue(result['host_workspace_hidden'])
+        self.assertTrue(result['host_home_hidden'])
+        self.assertTrue(result['pid_isolated'])
+        self.assertTrue(result['capabilities_dropped'])
+        self.assertTrue(result['root_readonly'])
+        self.assertTrue(result['tmp_writable'])
+        self.assertLessEqual(result['tmpfs_bytes'], pdf_worker.SANDBOX_TMPFS_BYTES)
         self.assertEqual(result['limits']['cpu'], [8, 10])
         self.assertEqual(result['limits']['address_space'], [
             512 * 1024 * 1024, 512 * 1024 * 1024,
         ])
         self.assertEqual(result['limits']['open_files'], [32, 32])
         self.assertEqual(result['limits']['core'], [0, 0])
+
+    def test_missing_bubblewrap_fails_closed(self):
+        with patch('pdf_worker.shutil.which', return_value=None):
+            with self.assertRaises(IntakeError) as caught:
+                pdf_worker._run_worker(b'synthetic')
+        self.assertEqual(str(caught.exception), 'PDF_WORKER_ISOLATION_UNAVAILABLE')
+
+    def test_private_storage_overlap_with_runtime_fails_closed(self):
+        with self.assertRaises(IntakeError) as caught:
+            pdf_worker._sandbox_mounts((sys.prefix,))
+        self.assertEqual(str(caught.exception), 'PDF_WORKER_ISOLATION_UNAVAILABLE')
+
+    def test_bubblewrap_setup_failure_has_a_stable_code(self):
+        failed = subprocess.CompletedProcess(['bwrap'], 1, stdout=b'', stderr=None)
+        with patch('pdf_worker.subprocess.run', return_value=failed):
+            with self.assertRaises(IntakeError) as caught:
+                pdf_worker._run_worker(b'synthetic')
+        self.assertEqual(str(caught.exception), 'PDF_WORKER_ISOLATION_UNAVAILABLE')
 
     def test_timeout_is_stable_and_does_not_echo_input(self):
         private = b'private manuscript wording'
@@ -291,7 +354,7 @@ class WorkerBoundaryTests(unittest.TestCase):
 
     def test_unexpected_worker_exit_has_stable_failure(self):
         with patch('pdf_worker.subprocess.run', return_value=
-                   subprocess.CompletedProcess(['python'], 1, stdout=b'', stderr=None)):
+                   subprocess.CompletedProcess(['python'], 2, stdout=b'', stderr=None)):
             with self.assertRaises(IntakeError) as caught:
                 pdf_worker._run_worker(b'synthetic')
         self.assertEqual(str(caught.exception), 'PDF_WORKER_FAILED')

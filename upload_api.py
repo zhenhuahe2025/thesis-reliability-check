@@ -303,7 +303,10 @@ class PDFUploadApp:
         try:
             data = staged_path.read_bytes()
             try:
-                pages = await asyncio.to_thread(parse_pdf, filename, data)
+                pages = await asyncio.to_thread(
+                    parse_pdf, filename, data,
+                    sandbox_exclusions=(str(self._storage_parent),),
+                )
             except IntakeError as exc:
                 code = str(exc)
                 if code == 'FILE_TOO_LARGE':

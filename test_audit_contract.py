@@ -7,6 +7,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 from audit_contract import (Evidence, Finding, IntakeError, Page,
                             evidence_exists, parse_pdf)
+from test_support import requires_pdf_sandbox
 
 
 def pdf(text='Synthetic research evidence', encrypted=False):
@@ -34,6 +35,7 @@ class IntakeTests(unittest.TestCase):
             parse_pdf(filename, data)
         self.assertEqual(str(caught.exception), code)
 
+    @requires_pdf_sandbox
     def test_text_pdf_and_physical_page(self):
         pages = parse_pdf('paper.PDF', pdf())
         self.assertEqual(pages[0].number, 1)
@@ -45,6 +47,7 @@ class IntakeTests(unittest.TestCase):
     def test_renamed_file(self):
         self.assert_error('INVALID_PDF', 'paper.pdf', b'PK fake word document')
 
+    @requires_pdf_sandbox
     def test_signature_is_insufficient(self):
         self.assert_error('PDF_PARSE_FAILED', 'paper.pdf', b'%PDF-1.7\nnot a PDF')
 
@@ -55,13 +58,16 @@ class IntakeTests(unittest.TestCase):
         with patch('audit_contract.MAX_BYTES', 10):
             self.assert_error('FILE_TOO_LARGE', 'paper.pdf', pdf())
 
+    @requires_pdf_sandbox
     def test_page_limit(self):
         with patch('audit_contract.MAX_PAGES', 0):
             self.assert_error('PAGE_LIMIT', 'paper.pdf', pdf())
 
+    @requires_pdf_sandbox
     def test_encrypted(self):
         self.assert_error('ENCRYPTED_PDF', 'paper.pdf', pdf(encrypted=True))
 
+    @requires_pdf_sandbox
     def test_textless(self):
         page, = parse_pdf('paper.pdf', pdf(text=''))
         self.assertEqual(page.coverage_status, 'blank')
