@@ -82,8 +82,29 @@ class CitationMappingTests(unittest.TestCase):
         self.assertEqual([anchor.page for anchor in result.citations], [1, 2])
         for anchor in result.citations:
             self.assertEqual(joined[anchor.start_offset:anchor.end_offset], anchor.text)
+            self.assertEqual(
+                joined[anchor.sentence_start_offset:anchor.sentence_end_offset],
+                anchor.sentence_text,
+            )
         self.assertEqual(result.references[0].start_page, 2)
         self.assertEqual(result.references[0].end_page, 2)
+
+    def test_citation_in_line_wrapped_sentence_keeps_exact_sentence_span(self):
+        page = Page(1, (
+            "Introductory finding.\nThe mixed English and 中文 evidence\n"
+            "supports this claim [1]. A separate conclusion follows.\n\n"
+            "References\n[1] Smith, J. Article title. 2020."
+        ))
+        joined = page.text
+        result = analyze_references((page,))
+        anchor = result.citations[0]
+
+        expected = "The mixed English and 中文 evidence\nsupports this claim [1]."
+        self.assertEqual(anchor.sentence_text, expected)
+        self.assertEqual(
+            joined[anchor.sentence_start_offset:anchor.sentence_end_offset],
+            expected,
+        )
 
     def test_reference_entry_can_continue_across_physical_pages(self):
         pages = (
