@@ -26,4 +26,50 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2
       - run: python -m pip install -r requirements.txt
+      - name: Diagnose Bubblewrap worker self-test
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import pdf_worker
+
+          print("bubblewrap", subprocess.run(["bwrap", "--version"], capture_output=True, text=True).stdout.strip())
+          print("bubblewrap_mode", oct(os.stat("/usr/bin/bwrap").st_mode & 0o7777))
+          for name in ("unprivileged_userns_clone", "apparmor_restrict_unprivileged_userns"):
+              path = Path("/proc/sys/kernel") / name
+              if path.exists():
+                  print(name, path.read_text().strip())
+          parent_namespaces = {
+              name: str(os.stat("/proc/self/ns/" + name).st_ino)
+              for name in ("user", "mnt", "pid", "net")
+          }
+          with tempfile.TemporaryDirectory(prefix="trc-host-private-") as host_dir:
+              marker = Path(host_dir) / "sentinel"
+              marker.write_text("synthetic host-only sentinel", encoding="ascii")
+              probe = {
+                  "TRC_PARENT_NAMESPACES": json.dumps(parent_namespaces),
+                  "TRC_HOST_MARKER": str(marker),
+                  "TRC_HOST_WORKSPACE": str(Path(__file__).resolve().parent),
+                  "TRC_HOST_HOME": str(Path.home().resolve()),
+              }
+              command = pdf_worker._worker_command(probe=probe)
+              command.append("--self-test")
+              try:
+                  result = subprocess.run(
+                      command, input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      cwd=tempfile.gettempdir(),
+                      env={"PATH": os.defpath, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+                      timeout=5, check=False,
+                  )
+                  print("sandbox_return_code", result.returncode)
+                  print("sandbox_stdout", result.stdout.decode("utf-8", "replace")[:2000])
+                  print("sandbox_stderr", result.stderr.decode("utf-8", "replace")[:2000])
+              except subprocess.TimeoutExpired as error:
+                  print("sandbox_timeout", (error.stderr or b"").decode("utf-8", "replace")[:2000])
+          PY
       - run: python -m unittest -v
