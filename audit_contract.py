@@ -1,13 +1,14 @@
 """PDF-only intake and evidence contracts; no automated audit is implemented."""
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import PurePath
 from typing import Literal
 
-from pypdf import PdfReader
-
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 300
+PAGE_COVERAGE_STATUSES = (
+    'text_extracted', 'mixed', 'image_only', 'blank',
+    'unclassified_content', 'garbled',
+)
 
 
 class IntakeError(ValueError):
@@ -16,15 +17,24 @@ class IntakeError(ValueError):
 
 @dataclass(frozen=True)
 class Page:
-    number: int  # one-based physical PDF page, never a printed label
+    number: int
     text: str
+    coverage_status: Literal[
+        'text_extracted', 'mixed', 'image_only', 'blank',
+        'unclassified_content', 'garbled',
+    ] = 'text_extracted'
+    printed_label: str | None = None
+    text_start_offset: int = 0
+    text_end_offset: int = 0
 
 
 def parse_pdf(filename: str, data: bytes) -> tuple[Page, ...]:
-    """Parse in-memory bytes. Run in a resource-limited worker before web use.
+    """Parse in a restricted worker and retain explicit page coverage.
 
-    Textless pages fail closed in this first slice: OCR is not implemented.
-    No file is written and no document content is included in exceptions.
+    Offsets are end-exclusive code-point indexes into ``'\\n'.join(page.text
+    for page in result)``. The inserted one-character separators are the only
+    normalization; each page's extracted text is otherwise preserved exactly.
+    Printed page labels stay unknown unless a later parser can read them.
     """
     if PurePath(filename).suffix.lower() != '.pdf':
         raise IntakeError('PDF_REQUIRED')
@@ -34,21 +44,29 @@ def parse_pdf(filename: str, data: bytes) -> tuple[Page, ...]:
         raise IntakeError('FILE_TOO_LARGE')
     if not data.startswith(b'%PDF-'):
         raise IntakeError('INVALID_PDF')
-    try:
-        reader = PdfReader(BytesIO(data), strict=True)
-        if reader.is_encrypted:
-            raise IntakeError('ENCRYPTED_PDF')
-        if not 1 <= len(reader.pages) <= MAX_PAGES:
-            raise IntakeError('PAGE_LIMIT')
-        pages = tuple(Page(i + 1, page.extract_text() or '')
-                      for i, page in enumerate(reader.pages))
-        if any(not page.text.strip() for page in pages):
-            raise IntakeError('TEXTLESS_PAGE_REQUIRES_REVIEW')
-        return pages
-    except IntakeError:
-        raise
-    except Exception:
-        raise IntakeError('PDF_PARSE_FAILED') from None
+    from pdf_worker import parse_pdf_isolated
+
+    worker_pages = parse_pdf_isolated(data)
+    if not 1 <= len(worker_pages) <= MAX_PAGES:
+        raise IntakeError('PAGE_LIMIT')
+    pages = []
+    offset = 0
+    for index, record in enumerate(worker_pages):
+        if index:
+            offset += 1  # the documented LF separator in joined extraction
+        text = record['text']
+        start = offset
+        end = start + len(text)
+        pages.append(Page(
+            number=record['number'],
+            text=text,
+            coverage_status=record['coverage_status'],
+            printed_label=None,
+            text_start_offset=start,
+            text_end_offset=end,
+        ))
+        offset = end
+    return tuple(pages)
 
 
 @dataclass(frozen=True)
