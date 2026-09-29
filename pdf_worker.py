@@ -55,6 +55,9 @@ def install_seccomp():
     seccomp.seccomp_init.restype = ctypes.c_void_p
     seccomp.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
     seccomp.seccomp_syscall_resolve_name.restype = ctypes.c_int
+    seccomp.seccomp_rule_add.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint,
+    ]
     seccomp.seccomp_rule_add.restype = ctypes.c_int
     seccomp.seccomp_load.argtypes = [ctypes.c_void_p]
     seccomp.seccomp_load.restype = ctypes.c_int
