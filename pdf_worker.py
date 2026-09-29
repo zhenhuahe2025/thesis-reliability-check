@@ -176,11 +176,7 @@ def main():
     self_test = "--self-test" in sys.argv
     try:
         install_limits()
-        if self_test:
-            os.write(2, b"limits-installed\n")
         install_seccomp()
-        if self_test:
-            os.write(2, b"seccomp-installed\n")
     except Exception:
         sys.stdout.write(json.dumps({"error": "PDF_WORKER_ISOLATION_UNAVAILABLE"}))
         return 0
@@ -224,7 +220,7 @@ def _run_worker(data: bytes = b"", *, self_test: bool = False) -> dict[str, Any]
             command,
             input=data,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE if self_test else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             cwd=tempfile.gettempdir(),
             env=env,
             timeout=WALL_TIMEOUT_SECONDS,
@@ -237,9 +233,7 @@ def _run_worker(data: bytes = b"", *, self_test: bool = False) -> dict[str, Any]
 
     if result.returncode != 0:
         if self_test:
-            marker = result.stderr.decode("ascii", errors="ignore").strip().splitlines()
-            stage = marker[-1] if marker else "before-limits"
-            raise IntakeError(f"PDF_WORKER_SELF_TEST_FAILED_{stage}")
+            raise IntakeError("PDF_WORKER_SELF_TEST_FAILED")
         signal_errors = {
             -signal.SIGXCPU: "PDF_CPU_LIMIT",
             -signal.SIGKILL: "PDF_WORKER_KILLED",
