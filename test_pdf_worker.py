@@ -266,15 +266,28 @@ class WorkerBoundaryTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), 'PDF_TIMEOUT')
         self.assertNotIn(private.decode(), str(caught.exception))
 
-    def test_resource_termination_is_stable_and_does_not_echo_input(self):
+    def test_cpu_limit_termination_is_stable_and_does_not_echo_input(self):
         private = b'private manuscript wording'
         result = subprocess.CompletedProcess(['python'], -signal.SIGXCPU,
                                              stdout=private, stderr=None)
         with patch('pdf_worker.subprocess.run', return_value=result):
             with self.assertRaises(IntakeError) as caught:
                 pdf_worker._run_worker(private)
-        self.assertEqual(str(caught.exception), 'PDF_RESOURCE_LIMIT')
+        self.assertEqual(str(caught.exception), 'PDF_CPU_LIMIT')
         self.assertNotIn(private.decode(), str(caught.exception))
+
+    def test_killed_and_crashed_workers_have_separate_stable_codes(self):
+        for signum, expected in [
+            (signal.SIGKILL, 'PDF_WORKER_KILLED'),
+            (signal.SIGSEGV, 'PDF_WORKER_CRASHED'),
+        ]:
+            result = subprocess.CompletedProcess(['python'], -signum,
+                                                 stdout=b'', stderr=None)
+            with self.subTest(expected=expected):
+                with patch('pdf_worker.subprocess.run', return_value=result):
+                    with self.assertRaises(IntakeError) as caught:
+                        pdf_worker._run_worker(b'synthetic')
+                self.assertEqual(str(caught.exception), expected)
 
     def test_unexpected_worker_exit_has_stable_failure(self):
         with patch('pdf_worker.subprocess.run', return_value=
