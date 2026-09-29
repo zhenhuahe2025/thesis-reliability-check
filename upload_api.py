@@ -2,9 +2,9 @@
 
 This prototype streams request bodies to private temporary files before parsing.
 Authentication is injected by the host application; there is no default or
-development credential. Jobs live in memory and the PDF parser is not isolated,
-so do not expose this app to public traffic until the worker and persistence
-issues are implemented.
+development credential. Jobs live in memory and the restricted parser worker
+shares the service UID and filesystem, so this is not a full sandbox or a
+production-ready upload service.
 """
 from __future__ import annotations
 
@@ -15,12 +15,15 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid4
 
-from audit_contract import MAX_BYTES, IntakeError, parse_pdf
+from audit_contract import (
+    MAX_BYTES, PAGE_COVERAGE_STATUSES, IntakeError, parse_pdf,
+)
 
 MAX_IDEMPOTENCY_KEY = 200
 Authenticator = Callable[[Mapping[str, Any]], str | None | Awaitable[str | None]]
@@ -40,6 +43,8 @@ class DocumentRecord:
     sha256: str
     size_bytes: int
     page_count: int
+    coverage_summary: dict[str, int]
+    page_coverage: tuple[dict[str, Any], ...]
     path: Path
 
 
@@ -298,12 +303,21 @@ class PDFUploadApp:
         try:
             data = staged_path.read_bytes()
             try:
-                pages = parse_pdf(filename, data)
+                pages = await asyncio.to_thread(parse_pdf, filename, data)
             except IntakeError as exc:
-                status = 413 if str(exc) == 'FILE_TOO_LARGE' else 422
-                if str(exc) == 'EMPTY_FILE':
+                code = str(exc)
+                if code == 'FILE_TOO_LARGE':
+                    status = 413
+                elif code == 'EMPTY_FILE':
                     status = 400
-                raise RequestError(status, str(exc)) from None
+                elif code in {
+                    'PDF_WORKER_UNAVAILABLE',
+                    'PDF_WORKER_ISOLATION_UNAVAILABLE',
+                }:
+                    status = 503
+                else:
+                    status = 422
+                raise RequestError(status, code) from None
 
             async with self._lock:
                 job = self._jobs.get(job_id)
@@ -324,8 +338,22 @@ class PDFUploadApp:
                 document_path = self._root / f'{document_id}.pdf'
                 staged_path.replace(document_path)
                 os.chmod(document_path, 0o600)
+                counts = Counter(page.coverage_status for page in pages)
+                coverage_summary = {
+                    status: counts.get(status, 0)
+                    for status in PAGE_COVERAGE_STATUSES
+                }
+                page_coverage = tuple({
+                    'physical_page': page.number,
+                    'coverage_status': page.coverage_status,
+                    'printed_label': page.printed_label,
+                    'text_start_offset': page.text_start_offset,
+                    'text_end_offset': page.text_end_offset,
+                } for page in pages)
                 record = DocumentRecord(document_id, role, digest, size,
-                                        len(pages), document_path)
+                                        len(pages), coverage_summary,
+                                        page_coverage,
+                                        document_path)
                 job.documents[document_id] = record
                 job.idempotency[idempotency_key] = document_id
             await self._respond(send, 201, self._document_json(record))
@@ -368,6 +396,8 @@ class PDFUploadApp:
             'role': record.role,
             'size_bytes': record.size_bytes,
             'page_count': record.page_count,
+            'coverage_summary': dict(record.coverage_summary),
+            'page_coverage': [dict(page) for page in record.page_coverage],
         }
 
     @staticmethod
