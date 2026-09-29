@@ -20,7 +20,7 @@ MAX_EXTRACTED_CHARS = 250_000
 MAX_WORKER_OUTPUT_BYTES = 2 * 1024 * 1024
 SANDBOX_TMPFS_BYTES = 64 * 1024 * 1024
 
-_NAMESPACE_NAMES = ("user", "mnt", "pid", "net")
+_NAMESPACE_NAMES = ("user", "mnt", "pid")
 
 _BOOTSTRAP = r'''
 import ctypes
@@ -39,7 +39,7 @@ MAX_ADDRESS_SPACE = 512 * 1024 * 1024
 DENIED_SYSCALLS = (
     "socket", "socketpair", "connect", "bind", "listen", "accept", "accept4",
     "sendto", "sendmsg", "sendmmsg", "recvfrom", "recvmsg", "recvmmsg",
-    "shutdown", "fork", "vfork", "clone", "clone3", "execve", "execveat",
+    "shutdown", "socketcall", "fork", "vfork", "clone", "clone3", "execve", "execveat",
     "unshare", "setns", "mount", "umount2", "pivot_root", "open_by_handle_at",
     "io_uring_setup", "io_uring_enter", "io_uring_register", "bpf",
     "userfaultfd", "ptrace", "process_vm_readv", "process_vm_writev",
@@ -187,12 +187,15 @@ def main():
         sys.stdout.write(json.dumps({"error": "PDF_WORKER_ISOLATION_UNAVAILABLE"}))
         return 0
     if self_test:
-        try:
-            socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        except OSError as exc:
-            blocked = exc.errno == errno.EPERM
-        else:
-            blocked = False
+        blocked = True
+        for family in (socket.AF_INET, socket.AF_UNIX):
+            try:
+                test_socket = socket.socket(family, socket.SOCK_STREAM)
+            except OSError as exc:
+                blocked = blocked and exc.errno == errno.EPERM
+            else:
+                blocked = False
+                test_socket.close()
         limits = {
             "cpu": resource.getrlimit(resource.RLIMIT_CPU),
             "address_space": resource.getrlimit(resource.RLIMIT_AS),
@@ -201,7 +204,7 @@ def main():
         }
         expected_namespaces = json.loads(os.environ.get("TRC_PARENT_NAMESPACES", "{}"))
         namespaces = {}
-        for name in ("user", "mnt", "pid", "net"):
+        for name in ("user", "mnt", "pid"):
             try:
                 namespaces[name] = (
                     os.stat("/proc/self/ns/" + name).st_ino
@@ -329,6 +332,10 @@ def _sandbox_mounts(excluded_paths: tuple[str, ...] = ()) -> list[tuple[str, str
 
     for candidate in ("/lib", "/lib64", "/usr/lib", "/usr/lib64"):
         if os.path.isdir(candidate):
+            resolved = os.path.realpath(candidate)
+            if any(_path_contains(root, resolved) or _path_contains(resolved, root)
+                   for root in protected_roots):
+                raise IntakeError("PDF_WORKER_ISOLATION_UNAVAILABLE")
             runtime_roots.add(candidate)
 
     # Nested runtime directories are already covered by the shortest parent.
@@ -350,8 +357,10 @@ def _worker_command(*, probe: dict[str, str] | None = None,
     mounts = _sandbox_mounts(excluded_paths)
     command = [
         bubblewrap,
-        "--unshare-all",
         "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
         "--die-with-parent",
         "--new-session",
         "--as-pid-1",
