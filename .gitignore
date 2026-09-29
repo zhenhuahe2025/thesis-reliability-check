@@ -3,5 +3,6 @@ __pycache__/
 .venv/
 .env
 uploads/
+private_uploads/
 reports/
 *.pdf
